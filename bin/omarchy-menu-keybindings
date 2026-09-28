@@ -440,7 +440,7 @@ prioritize_entries() {
   awk -F '\t' '
   {
     # Alternative chords are display only. Classifying on them would read
-    # "SUPER SHIFT + RETURN / SUPER SHIFT + B" as the alternate browser chord
+    # "SUPER + SHIFT + RETURN / SUPER + SHIFT + B" as the alternate browser chord
     # and drop the browser 20 rows down its own list, so match the chord that
     # leads the row and ignore the rest.
     line = $1
@@ -535,7 +535,7 @@ output_binding_records_uncached() {
 
 keybindings_cache_key() {
   {
-    printf 'v14\n'
+    printf 'v15\n'
     hyprctl devices 2>/dev/null | grep -F 'active keymap:'
     hyprctl binds 2>/dev/null
   } | sha256sum | awk '{ print $1 }'
