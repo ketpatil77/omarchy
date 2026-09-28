@@ -160,6 +160,10 @@ assert(
   rankScore('apps.rustdesk', 'rust') < rankScore('remove.development.rust', 'rust'),
   'menu keeps a destructive exact match below an app prefix match'
 )
+assert(
+  rankScore('install.development.go', 'go') < rankScore('setup.network.dns.google', 'go'),
+  'menu keeps an exact install match above a menu prefix match'
+)
 
 // Routing: htop ships `Keywords=system;...`, which app rows carry as aliases.
 // An installed app must never capture a menu route (SUPER+ESCAPE opens the
