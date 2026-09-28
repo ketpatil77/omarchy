@@ -51,4 +51,8 @@ assert(
   /source: item\.sourceActivated && item\.thumbnailPath \? Util\.fileUrl\(item\.thumbnailPath\) : ""[\s\S]*asynchronous: false/.test(imagePickerQml),
   'image picker loads activated thumbnails synchronously to avoid carousel flicker'
 )
+assert(
+  /root\.filterable && [^\n]*!\(event\.modifiers & \(Qt\.ControlModifier \| Qt\.AltModifier \| Qt\.MetaModifier\)\)/.test(imagePickerQml),
+  'image picker filter accepts printable text carrying Shift plus keypad or layout modifiers'
+)
 JS
