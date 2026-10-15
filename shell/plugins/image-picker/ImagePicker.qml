@@ -15,6 +15,7 @@ Item {
   // Injected by omarchy-shell; defaults to the session OMARCHY_PATH.
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   property string stateHome: Quickshell.env("HOME") + "/.local/state"
+  property string userThemesPath: Quickshell.env("HOME") + "/.config/omarchy/themes"
   property string imageDirs: Quickshell.env("OMARCHY_IMAGE_SELECTOR_DIRS") || Quickshell.env("OMARCHY_IMAGE_SELECTOR_DIR") || Quickshell.env("OMARCHY_STOCK_BACKGROUNDS_DIR") || (stateHome + "/omarchy/current/theme/backgrounds")
   property string imageRows: ""
   property string loadedImageRows: ""
@@ -39,6 +40,13 @@ Item {
   property string themeRows: ""
   property bool themeMode: false
   property bool themeOpenPending: false
+  property var extraThemeNames: []
+  property var stockThemeNames: []
+  property bool stockThemesKnown: false
+  property bool awaitingDeleteRefresh: false
+  property string pendingDeleteTheme: ""
+  property string deleteSelectionPath: ""
+  property bool deleteConfirmOpen: false
   // Bound to the central [image-picker] section in shell.toml via Commons.Color.qml.
   // `dimColor` tints unselected slices and text outlines against the desktop
   // behind the picker; it intentionally tracks the foundational background,
@@ -58,7 +66,14 @@ Item {
   readonly property int previewRadius: Math.max(1, Math.min(16, Math.ceil((panel.width - expandedWidth) / (2 * (sliceWidth + sliceSpacing))) + 1))
   onPreviewRadiusChanged: updateVisibleItems()
 
-  onOpenedChanged: if (!opened) { layoutSettled = false; renderedFrames = 0 }
+  onOpenedChanged: if (!opened) { layoutSettled = false; renderedFrames = 0; deleteConfirmOpen = false; pendingDeleteTheme = ""; deleteSelectionPath = ""; awaitingDeleteRefresh = false }
+
+  PreviewHold {
+    id: previewHold
+    active: root.opened
+    // The selected preview decodes first again on the next open.
+    onHeldChanged: if (!held) root.neighborImagesEnabled = false
+  }
 
   function scriptPath(name) {
     return omarchyPath + "/shell/plugins/image-picker/" + name
@@ -118,7 +133,7 @@ Item {
 
   function currentLabel() {
     var path = currentPath()
-    if (!path) return filterText ? "No matches" : ""
+    if (!path) return filterText ? Commons.I18n.t("common.noMatches") : ""
 
     return labelForPath(path)
   }
@@ -179,6 +194,7 @@ Item {
   }
 
   function applySelected() {
+    if (themeMode && (deleteThemeProc.running || awaitingDeleteRefresh)) return
     var path = currentPath()
 
     if (themeMode) {
@@ -251,6 +267,10 @@ Item {
   }
 
   function openSelector(nextImageDirs, nextImageRows, nextSelectedImage, nextSelectionFile, nextDoneFile, nextShowLabels, nextFilterable) {
+    deleteConfirmOpen = false
+    pendingDeleteTheme = ""
+    deleteSelectionPath = ""
+    awaitingDeleteRefresh = false
     if (requestActive && doneFile && doneFile !== nextDoneFile)
       finishDoneFile(doneFile)
 
@@ -356,6 +376,8 @@ Item {
       themeOpenPending = true
     }
     refreshThemeRows()
+    refreshExtraThemes()
+    refreshStockThemes()
   }
 
   function openThemeRows() {
@@ -363,8 +385,53 @@ Item {
     themeMode = true
   }
 
+  // A refresh asked mid-refresh (a deletion finishing behind the open-time
+  // one) queues a second pass instead of leaving the list stale.
   function refreshThemeRows() {
-    if (!themeRowsProc.running) themeRowsProc.running = true
+    if (themeRowsProc.running) { themeRowsProc.queued = true; return }
+    themeRowsProc.running = true
+  }
+
+  function refreshExtraThemes() {
+    if (extraThemesProc.running) { extraThemesProc.queued = true; return }
+    extraThemesProc.running = true
+  }
+
+  function refreshStockThemes() {
+    if (!stockThemesProc.running) stockThemesProc.running = true
+  }
+
+  function selectedThemeName() {
+    return nameForPath(currentPath())
+  }
+
+  function canDeleteSelectedTheme() {
+    return themeMode && !deleteThemeProc.running && !awaitingDeleteRefresh && stockThemesKnown && ImagePickerModel.canDeleteTheme(selectedThemeName(), extraThemeNames, stockThemeNames)
+  }
+
+  function requestDeleteSelectedTheme() {
+    if (!canDeleteSelectedTheme()) return
+    pendingDeleteTheme = selectedThemeName()
+    deleteConfirm.selectedIndex = 1
+    deleteConfirmOpen = true
+  }
+
+  function cancelDeleteTheme() {
+    deleteConfirmOpen = false
+    pendingDeleteTheme = ""
+  }
+
+  // Removal itself is omarchy-theme-remove's job (including its guards and
+  // notification); the picker only refreshes its rows once it finishes.
+  function confirmDeleteTheme() {
+    var name = pendingDeleteTheme
+    deleteConfirmOpen = false
+    pendingDeleteTheme = ""
+    if (!name || deleteThemeProc.running) return
+    // Keep the user's place in the list once the deleted theme is gone.
+    if (name === selectedThemeName()) deleteSelectionPath = ImagePickerModel.replacementSelectionPath(imageArray, selectedIndex, filterText)
+    deleteThemeProc.command = ["omarchy-theme-remove", name]
+    deleteThemeProc.running = true
   }
 
   function updateThemeRows(rows) {
@@ -376,8 +443,11 @@ Item {
       if (rows) openThemeRows()
     } else if (changed && rows && themeMode && opened) {
       // A theme was added or removed since the rows were last read. Keep the
-      // user's place in the carousel rather than jumping back to the current.
-      selectedImage = currentPath() || currentThemePreview()
+      // user's place in the carousel rather than jumping back to the current;
+      // a just-deleted selection lands on the theme before it.
+      selectedImage = deleteSelectionPath || currentPath() || currentThemePreview()
+      deleteSelectionPath = ""
+      awaitingDeleteRefresh = false
       imageRows = rows
       loadRows(rows, false)
     }
@@ -392,13 +462,62 @@ Item {
 
   Process {
     id: themeRowsProc
+    property bool queued: false
     command: [root.omarchyPath + "/bin/omarchy-theme-switcher", "--print-rows"]
     stdout: StdioCollector {
       onStreamFinished: root.updateThemeRows(String(text || "").trim())
     }
+    onExited: {
+      if (queued) {
+        queued = false
+        running = true
+      }
+    }
   }
 
-  Component.onCompleted: refreshThemeRows()
+  // The same listing omarchy-theme-remove offers interactively: real
+  // directories under the user themes path, never symlinked working copies.
+  Process {
+    id: extraThemesProc
+    property bool queued: false
+    command: ["find", root.userThemesPath, "-mindepth", "1", "-maxdepth", "1", "-type", "d", "!", "-xtype", "l", "-printf", "%f\n"]
+    stdout: StdioCollector {
+      onStreamFinished: root.extraThemeNames = ImagePickerModel.parseThemeNames(String(text || ""))
+    }
+    onExited: {
+      if (queued) {
+        queued = false
+        running = true
+      }
+    }
+  }
+
+  Process {
+    id: stockThemesProc
+    command: ["find", root.omarchyPath + "/themes", "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-printf", "%f\n"]
+    stdout: StdioCollector {
+      onStreamFinished: root.stockThemeNames = ImagePickerModel.parseThemeNames(String(text || ""))
+    }
+    // Until this lands, stockThemeNames is empty and an override would look
+    // deletable: deletion stays disabled unless the listing succeeded.
+    onExited: function(exitCode) { if (exitCode === 0) root.stockThemesKnown = true }
+  }
+
+  Process {
+    id: deleteThemeProc
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.awaitingDeleteRefresh = true
+      else root.deleteSelectionPath = ""
+      root.refreshExtraThemes()
+      root.refreshThemeRows()
+    }
+  }
+
+  Component.onCompleted: {
+    refreshThemeRows()
+    refreshExtraThemes()
+    refreshStockThemes()
+  }
 
   function startImageScan(serial, dirs) {
     if (loadImagesProc.running) {
@@ -479,6 +598,7 @@ Item {
     // leaving the picker invisible behind its own open overlay.
     if (opened || requestActive) return
 
+    previewHold.warm()
     requestSerial += 1
     imageRows = nextImageRows
     selectedImage = nextSelectedImage
@@ -561,9 +681,14 @@ Item {
 
           readonly property real itemStep: root.sliceWidth + root.sliceSpacing
           readonly property real previewX: (width - root.expandedWidth) / 2
+          readonly property bool mirrored: LayoutMirroring.enabled
 
           Keys.priority: Keys.BeforeItem
           Keys.onPressed: function(event) {
+            if (root.deleteConfirmOpen) {
+              if (deleteConfirm.handleKey(event)) event.accepted = true
+              return
+            }
             // Nothing is visible before the reveal: only let the user back
             // out, never filter into a dead end or apply an unseen pick.
             if (!root.layoutSettled) {
@@ -583,13 +708,16 @@ Item {
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
               root.applySelected()
               event.accepted = true
+            } else if (event.key === Qt.Key_Delete && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
+              root.requestDeleteSelectedTheme()
+              event.accepted = true
             } else if (root.filterable && Util.editsFilter(event, root.filterText)) {
               root.updateFilter(Util.editedFilter(event, root.filterText))
               event.accepted = true
-            } else if (event.key === Qt.Key_Left || (event.key === Qt.Key_Tab && event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab) {
+            } else if (Util.readingKey(event) === Qt.Key_Left || (event.key === Qt.Key_Tab && event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab) {
               root.selectAdjacent(-1)
               event.accepted = true
-            } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Tab) {
+            } else if (Util.readingKey(event) === Qt.Key_Right || event.key === Qt.Key_Tab) {
               root.selectAdjacent(1)
               event.accepted = true
             } else if (root.filterable && event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127 && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
@@ -621,7 +749,10 @@ Item {
               onPreviewSettledChanged: if (previewSettled) root.maybeReveal()
               onSelectedChanged: if (selected && previewReady) root.neighborImagesEnabled = true
 
-              x: selected ? carousel.previewX : (relativeIndex < 0 ? carousel.previewX + relativeIndex * carousel.itemStep : carousel.previewX + root.expandedWidth + root.sliceSpacing + (relativeIndex - 1) * carousel.itemStep)
+              readonly property real readingX: selected ? carousel.previewX : (relativeIndex < 0 ? carousel.previewX + relativeIndex * carousel.itemStep : carousel.previewX + root.expandedWidth + root.sliceSpacing + (relativeIndex - 1) * carousel.itemStep)
+              // A mirrored (right-to-left) layout runs the carousel from the
+              // right, so the next image sits where the reading continues.
+              x: carousel.mirrored ? carousel.width - readingX - width : readingX
               width: selected ? root.expandedWidth : root.sliceWidth
               height: selected ? root.expandedHeight : root.sliceHeight
               y: selected ? 0 : (root.expandedHeight - root.sliceHeight) / 2
@@ -677,7 +808,7 @@ Item {
                   // every preview visited in a large collection.
                   // Queue the selected preview first; neighbors must not delay
                   // the image the user opened the picker to see.
-                  source: (item.selected || root.neighborImagesEnabled) && item.thumbnailPath ? Util.fileUrl(item.thumbnailPath) : ""
+                  source: previewHold.held && (item.selected || root.neighborImagesEnabled) && item.thumbnailPath ? Util.fileUrl(item.thumbnailPath) : ""
                   sourceSize.width: Math.ceil(root.expandedWidth * Screen.devicePixelRatio)
                   sourceSize.height: Math.ceil(root.expandedHeight * Screen.devicePixelRatio)
                   fillMode: Image.PreserveAspectCrop
@@ -754,6 +885,21 @@ Item {
           horizontalAlignment: Text.AlignHCenter
           elide: Text.ElideRight
         }
+    }
+
+    // Unlike the picker itself, the confirmation keeps the faded backdrop:
+    // a destructive choice should take over the screen.
+    ConfirmDialog {
+      id: deleteConfirm
+      anchors.fill: parent
+      opened: root.deleteConfirmOpen
+      z: 10
+      message: Commons.I18n.t("imagePicker.deleteTheme").arg(root.pendingDeleteTheme ? root.labelForPath(root.pendingDeleteTheme) : "")
+      confirmText: Commons.I18n.t("common.delete")
+      background: root.dimColor
+      foreground: root.foreground
+      onCanceled: root.cancelDeleteTheme()
+      onConfirmed: root.confirmDeleteTheme()
     }
   }
 }
