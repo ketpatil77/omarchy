@@ -165,6 +165,30 @@ assert(
   'menu keeps an exact install match above a menu prefix match'
 )
 
+// Management rows are named after their target, so "edg" prefix-matches
+// Remove > Browser > Edge while it only substring-matches Microsoft Edge.
+const managed = menu.mergeAppRows(rankBase.items, rankBase.itemOrder, [
+  { id: 'apps.google-chrome', parent: 'apps', kind: 'app', label: 'Google Chrome', description: '', aliases: [] },
+  { id: 'apps.microsoft-edge', parent: 'apps', kind: 'app', label: 'Microsoft Edge', description: '', aliases: [] }
+])
+const managedScore = (id, query, active) => menu.searchScore(managed.items, managed.items[id], query, active)
+assert(
+  ['install.browser.edge', 'remove.browser.edge', 'setup.default.browser.edge', 'update.channel.edge'].every(
+    id => managedScore('apps.microsoft-edge', 'edg') < managedScore(id, 'edg')
+  ) && ['install.browser.chrome', 'remove.browser.chrome', 'setup.default.browser.chrome'].every(
+    id => managedScore('apps.google-chrome', 'chr') < managedScore(id, 'chr')
+  ),
+  'menu ranks an installed app above the management rows named after it'
+)
+assert(
+  managedScore('update.hardware.audio', 'audio') < managedScore('trigger.capture.screenrecord.no-audio', 'audio'),
+  'menu leaves management rows alone when no app named after them is installed'
+)
+assert(
+  managedScore('install.browser.edge', 'e', 'install.browser') < managedScore('install.browser.brave', 'e', 'install.browser'),
+  'menu keeps management rows in match order where the app is not listed'
+)
+
 // Routing: htop ships `Keywords=system;...`, which app rows carry as aliases.
 // An installed app must never capture a menu route (SUPER+ESCAPE opens the
 // `system` menu), while its keywords keep working for search.

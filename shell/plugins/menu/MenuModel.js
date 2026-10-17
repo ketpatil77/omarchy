@@ -338,7 +338,25 @@ function matchesQuery(entry, query, visible) {
   return true
 }
 
-function searchScore(items, entry, query) {
+var MANAGEMENT_MENUS = ["install", "remove", "setup", "update"]
+
+// Install, Remove, Setup and Update name a row after its target alone (Remove > Browser > Edge is
+// just Edge), so "edg" matches it better than the app it manages, Microsoft Edge.
+function namesListedApp(items, entry, needle, active) {
+  if (entry.kind !== "action" || !needle) return false
+  if (!MANAGEMENT_MENUS.some(function(menuId) { return isDescendantOf(items, entry.id, menuId) })) return false
+
+  var label = entry.label.toLowerCase()
+  for (var id in items) {
+    var app = items[id]
+    if (!app || app.kind !== "app" || !isDescendantOf(items, id, active || "root")) continue
+    var appLabel = app.label.toLowerCase()
+    if (appLabel.indexOf(needle) >= 0 && appLabel.split(/\s+/).indexOf(label) >= 0) return true
+  }
+  return false
+}
+
+function searchScore(items, entry, query, active) {
   var needle = String(query || "").toLowerCase().trim()
   var label = entry.label.toLowerCase()
   var nameText = nameSearchText(entry)
@@ -361,6 +379,8 @@ function searchScore(items, entry, query) {
   // App rows sort after all menu items, so they lose the tiebreak below to an
   // equal match. Outrank those, but stay inside the tier so better ones win.
   if (entry.kind === "app") score -= 5
+  // Sink it past that app's weakest label match (30 - 5), and only while the app is listed beside it.
+  else if (namesListedApp(items, entry, needle, active)) score += 30
 
   return score * 1000 + depthFor(items, entry.id) * 25 + entry.order
 }
